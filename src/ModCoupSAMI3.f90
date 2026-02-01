@@ -27,6 +27,7 @@ contains
     use ModMpi
     use ModPlanet
     use coup_mod, only:nParams
+    use ModSources, only:AuroralIonRateS
     implicit none
 
     real,allocatable :: GITMLons(:)
@@ -42,6 +43,8 @@ contains
     integer :: iParam,ip
     integer :: j
 
+    real :: AurTmp(-1:nLons+2,-1:nLats+2,-1:nAlts+2)
+    
     ! allocate GITM data to exchange
     if (iproc==0) then
        allocate(GatLongitude(-1:(nLons+4)*nBlocks-2,nprocs))
@@ -129,7 +132,32 @@ contains
             (iBlock-1)*(nLats+4)-1:iBlock*(nLats+4)-2,&
             (iBlock-1)*(nAlts+4)-1:iBlock*(nAlts+4)-2) = &
             Velocity(:,:,:,iUp_,iBlock)
-    
+
+       ! O+
+       AurTmp = 0.0
+       AurTmp(1:nLons,1:nLats,1:nAlts) = AuroralIonRateS(:,:,:,iO_3P_,iBlock)
+       
+       GITMVars(17,&
+            (iBlock-1)*(nLons+4)-1:iBlock*(nLons+4)-2,&
+            (iBlock-1)*(nLats+4)-1:iBlock*(nLats+4)-2,&
+            (iBlock-1)*(nAlts+4)-1:iBlock*(nAlts+4)-2) = AurTmp(:,:,:)
+       ! O2+
+       AurTmp = 0.0
+       AurTmp(1:nLons,1:nLats,1:nAlts) = AuroralIonRateS(:,:,:,iO2_,iBlock)
+
+       GITMVars(18,&
+            (iBlock-1)*(nLons+4)-1:iBlock*(nLons+4)-2,&
+            (iBlock-1)*(nLats+4)-1:iBlock*(nLats+4)-2,&
+            (iBlock-1)*(nAlts+4)-1:iBlock*(nAlts+4)-2) = AurTmp(:,:,:)
+       ! N2+
+       AurTmp=0.0
+       AurTmp(1:nLons,1:nLats,1:nAlts) = AuroralIonRateS(:,:,:,iN2_,iBlock)
+
+       GITMVars(19,&
+            (iBlock-1)*(nLons+4)-1:iBlock*(nLons+4)-2,&
+            (iBlock-1)*(nLats+4)-1:iBlock*(nLats+4)-2,&
+            (iBlock-1)*(nAlts+4)-1:iBlock*(nAlts+4)-2) = AurTmp(:,:,:)
+       
        GITMLons((iBlock-1)*(nLons+4)-1:iBlock*(nLons+4)-2) = &
             Longitude(:,iBlock)
 

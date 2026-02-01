@@ -615,7 +615,8 @@ contains
        if (DoCheckForNaNs) write(*,*) "Correcting negative ion density in set_vertical_bcs : ", iAlt, iSpecies
 
        if (LogINS(iAlt-6, iSpecies) < 0.0) then
-          write(*,*) 'Negative Ion density too close to the upper boundary: ', iSpecies
+          write(*,*) 'Negative Ion density too close to the upper boundary: ', iSpecies, iAlt
+          ! LogINS(iAlt-6, iSpecies) = 0.1
           call stop_gitm('Stopping in set_vertical_bcs')
        endif
 
