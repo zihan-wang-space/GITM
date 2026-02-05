@@ -119,6 +119,15 @@ module ModSources
   real :: ChemicalHeatingRateIon(nLons, nLats, nAlts)
   real :: ChemicalHeatingRateEle(nLons, nLats, nAlts)
 
+  ! External ED energy flux input (lon, lat, energy)
+  real, allocatable :: ED_EnergyFluxLL(:,:,:)
+  real, allocatable :: ED_Ion_EnergyFluxLL(:,:,:)
+  integer :: EDEnergyFlux_LastMinute = -1
+  logical :: EDEnergyFlux_Loaded = .false.
+  logical :: EDIonEnergyFlux_Loaded = .false.
+  character(len=200) :: EDEnergyFluxFile = "en_energyflux.dat"
+  character(len=200) :: EDIonEnergyFluxFile = "ion_energyflux.dat"
+  
   !\
   ! Needed for Fang et al, 2010:
   !/

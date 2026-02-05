@@ -56,10 +56,16 @@ subroutine init_energy_deposition
   allocate(ED_EnergyFlux(ED_N_Energies), stat=ierr)
   allocate(ED_Ion_Flux(ED_N_Energies), stat=ierr)
   allocate(ED_Ion_EnergyFlux(ED_N_Energies), stat=ierr)
+  allocate(ED_EnergyFluxLL(nLons, nLats, ED_N_Energies), stat=ierr)
+  allocate(ED_Ion_EnergyFluxLL(nLons, nLats, ED_N_Energies), stat=ierr)
+  
   if (ierr /= 0) then
      call stop_gitm("Error allocating array ED_Flux")
   endif
 
+  ED_EnergyFluxLL = 0.0
+  ED_Ion_EnergyFluxLL = 0.0
+    
   if (iDebugLevel > 2) write(*,*) "===> ED_Get_Grid"
   call ED_Get_Grid(ED_grid, .true., ierr)
 

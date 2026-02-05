@@ -126,6 +126,8 @@ subroutine aurora(iBlock)
   AuroralHeatingRate(:,:,:,iBlock) = 0.0
   AuroralIonRateS = 0.0
 
+  call UpdateEDEnergyFluxFromFile(iBlock)
+  
   call report("Aurora",1)
   call start_timing("Aurora")
 
@@ -415,6 +417,18 @@ subroutine aurora(iBlock)
 
         endif
 
+        if (EDEnergyFlux_Loaded) then
+           ED_EnergyFlux(:) = ED_EnergyFluxLL(j,i,:)
+           ED_Flux(:) = ED_EnergyFlux(:) / (ED_Energies(:) * ED_delta_energy(:))
+           if (maxval(ED_EnergyFlux) > 0.0) HasSomeAurora = .true.
+        endif
+
+        if (EDIonEnergyFlux_Loaded) then
+           ED_Ion_EnergyFlux(:) = ED_Ion_EnergyFluxLL(j,i,:)
+           ED_Ion_Flux(:) = ED_Ion_EnergyFlux(:) / (ED_Energies(:) * ED_delta_energy(:))
+           if (maxval(ED_Ion_EnergyFlux) > 0.0) HasSomeAurora = .true.
+        endif
+        
         if (HasSomeAurora) then
 
            if (UseFangEnergyDeposition) then
@@ -566,6 +580,165 @@ subroutine aurora(iBlock)
 
 end subroutine aurora
 
+subroutine UpdateEDEnergyFluxFromFile(iBlock)
 
+   use ModSources
+   use ModGITM, only: MLT, MLatitude, nAlts
+   use ModTime,  only: tSimulation, iTimeArray
+  use ModIoUnit, only: io_unit_new
+
+  implicit none
+
+   integer, intent(in) :: iBlock
+   integer :: iMinute
+   integer :: targetTime(6)
+    real :: FluxMag(nLons, nLats, ED_N_Energies)
+    real :: IonFluxMag(nLons, nLats, ED_N_Energies)
+
+  if (.not. allocated(ED_EnergyFluxLL)) return
+
+  iMinute = int(tSimulation / 60.0)
+  if (iMinute == EDEnergyFlux_LastMinute) return
+  EDEnergyFlux_LastMinute = iMinute
+  EDEnergyFlux_Loaded = .false.
+  EDIonEnergyFlux_Loaded = .false.
+
+  targetTime(1) = iTimeArray(1)
+  targetTime(2) = iTimeArray(2)
+  targetTime(3) = iTimeArray(3)
+  targetTime(4) = iTimeArray(4)
+  targetTime(5) = iTimeArray(5)
+  targetTime(6) = iTimeArray(6)
+
+  call ReadEnergyFile(trim(EDEnergyFluxFile), FluxMag, EDEnergyFlux_Loaded)
+  if (EDEnergyFlux_Loaded) then
+     call RemapMagToGeo(FluxMag, ED_EnergyFluxLL, iBlock)
+  endif
+
+  call ReadEnergyFile(trim(EDIonEnergyFluxFile), IonFluxMag, EDIonEnergyFlux_Loaded)
+  if (EDIonEnergyFlux_Loaded) then
+     call RemapMagToGeo(IonFluxMag, ED_Ion_EnergyFluxLL, iBlock)
+  endif
+
+contains
+
+   subroutine ReadEnergyFile(cFile, FluxLL, IsLoaded)
+
+    character(len=*), intent(in) :: cFile
+    real, intent(out) :: FluxLL(nLons, nLats, ED_N_Energies)
+    logical, intent(out) :: IsLoaded
+
+    integer :: iUnit, iErr
+    integer :: iLon, iLat, iEnergy
+    integer :: y, mo, d, h, mi, s
+    real :: dummy(ED_N_Energies)
+
+    IsLoaded = .false.
+
+    iUnit = io_unit_new()
+    open(iUnit, file=trim(cFile), status='old', action='read', iostat=iErr)
+    if (iErr /= 0) then
+       close(iUnit)
+       !write (*,*) "Cannot find ", cFile
+       return
+    endif
+
+    do
+       read(iUnit, *, iostat=iErr) y, mo, d, h, mi, s
+       if (iErr /= 0) exit
+
+       if (y == targetTime(1) .and. mo == targetTime(2) .and. d == targetTime(3) .and. &
+           h == targetTime(4) .and. mi == targetTime(5) .and. s == targetTime(6)) then
+          do iLat = 1, nLats
+             do iLon = 1, nLons
+                read(iUnit, *, iostat=iErr) (FluxLL(iLon,iLat,iEnergy), iEnergy=1, ED_N_Energies)
+                if (iErr /= 0) exit
+             enddo
+             if (iErr /= 0) exit
+          enddo
+          if (iErr == 0) IsLoaded = .true.
+          write (*,*) 'Find the precipitation in ', cFile
+          exit
+       else
+          do iLat = 1, nLats
+             do iLon = 1, nLons
+                read(iUnit, *, iostat=iErr) (dummy(iEnergy), iEnergy=1, ED_N_Energies)
+                if (iErr /= 0) exit
+             enddo
+             if (iErr /= 0) exit
+          enddo
+          if (iErr /= 0) exit
+       endif
+    enddo
+
+    close(iUnit)
+
+  end subroutine ReadEnergyFile
+
+  subroutine RemapMagToGeo(FluxMag, FluxGeo, iBlock)
+
+    real, intent(in) :: FluxMag(nLons, nLats, ED_N_Energies)
+    real, intent(out) :: FluxGeo(nLons, nLats, ED_N_Energies)
+    integer, intent(in) :: iBlock
+
+    integer :: iLon, iLat, iEnergy
+    integer :: iMlt0, iMlt1, iMlat0, iMlat1
+    real :: mlt_val, mlat_val
+    real :: dmlt, dmlat, fmlt, fmlat, wmlt, wmlat
+    real :: mlat_min
+
+    FluxGeo = 0.0
+
+    if (nLons <= 0 .or. nLats <= 0) return
+
+    dmlt = 24.0 / real(nLons)
+    mlat_min = -90.0
+    if (nLats > 1) then
+       dmlat = 180.0 / real(nLats - 1)
+    else
+       dmlat = 1.0
+    endif
+
+    do iLat = 1, nLats
+       do iLon = 1, nLons
+
+          mlt_val = MLT(iLon, iLat, nAlts+1)
+          if (mlt_val < 0.0) mlt_val = mlt_val + 24.0
+          if (mlt_val >= 24.0) mlt_val = mlt_val - 24.0
+
+          fmlt = mlt_val / dmlt
+          iMlt0 = int(fmlt) + 1
+          if (iMlt0 > nLons) iMlt0 = 1
+          iMlt1 = iMlt0 + 1
+          if (iMlt1 > nLons) iMlt1 = 1
+          wmlt = fmlt - real(int(fmlt))
+
+          mlat_val = MLatitude(iLon, iLat, nAlts+1, iBlock)
+          if (mlat_val < -90.0) mlat_val = -90.0
+          if (mlat_val >  90.0) mlat_val =  90.0
+
+          if (nLats > 1) then
+             fmlat = (mlat_val - mlat_min) / dmlat
+             iMlat0 = int(fmlat) + 1
+             if (iMlat0 < 1) iMlat0 = 1
+             if (iMlat0 > nLats-1) iMlat0 = nLats-1
+             iMlat1 = iMlat0 + 1
+             wmlat = fmlat - real(int(fmlat))
+          else
+             iMlat0 = 1
+             iMlat1 = 1
+             wmlat = 0.0
+          endif
+
+          do iEnergy = 1, ED_N_Energies
+             FluxGeo(iLon,iLat,iEnergy) =(1.0-wmlt)*(1.0-wmlat)*FluxMag(iMlt0,iMlat0,iEnergy) +(    wmlt)*(1.0-wmlat)*FluxMag(iMlt1,iMlat0,iEnergy) +(1.0-wmlt)*(    wmlat)*FluxMag(iMlt0,iMlat1,iEnergy) +(    wmlt)*(    wmlat)*FluxMag(iMlt1,iMlat1,iEnergy)
+          enddo
+
+       enddo
+    enddo
+
+  end subroutine RemapMagToGeo
+
+end subroutine UpdateEDEnergyFluxFromFile
 
 
