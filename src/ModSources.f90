@@ -122,7 +122,6 @@ module ModSources
   ! External ED energy flux input (lon, lat, energy)
   real, allocatable :: ED_EnergyFluxLL(:,:,:)
   real, allocatable :: ED_Ion_EnergyFluxLL(:,:,:)
-  integer :: EDEnergyFlux_LastMinute = -1
   logical :: EDEnergyFlux_Loaded = .false.
   logical :: EDIonEnergyFlux_Loaded = .false.
   character(len=200) :: EDEnergyFluxFile = "en_energyflux.dat"

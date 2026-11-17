@@ -584,32 +584,22 @@ subroutine UpdateEDEnergyFluxFromFile(iBlock)
 
    use ModSources
    use ModGITM, only: MLT, MLatitude, nAlts
-   use ModTime,  only: tSimulation, iTimeArray
+   use ModTime,  only: CurrentTime
+   use ModKind, only: Real8_, Int8_
+   use ModTimeConvert, only: time_int_to_real
    use ModIoUnit, only: io_unit_new
 
   implicit none
 
    integer, intent(in) :: iBlock
-   integer :: iMinute
    integer :: nLatsFile, nLonsFile
-   integer :: targetTime(6)
    real, allocatable :: FluxMag(:,:,:)
    real, allocatable :: IonFluxMag(:,:,:)
 
   if (.not. allocated(ED_EnergyFluxLL)) return
 
-  iMinute = int(tSimulation / 60.0)
-  if (iMinute == EDEnergyFlux_LastMinute) return
-  EDEnergyFlux_LastMinute = iMinute
   EDEnergyFlux_Loaded = .false.
   EDIonEnergyFlux_Loaded = .false.
-
-  targetTime(1) = iTimeArray(1)
-  targetTime(2) = iTimeArray(2)
-  targetTime(3) = iTimeArray(3)
-  targetTime(4) = iTimeArray(4)
-  targetTime(5) = iTimeArray(5)
-  targetTime(6) = iTimeArray(6)
 
   call ReadEnergyFile(trim(EDEnergyFluxFile), nLatsFile, nLonsFile, FluxMag, EDEnergyFlux_Loaded)
   if (EDEnergyFlux_Loaded) then
@@ -635,65 +625,78 @@ contains
 
     integer :: iUnit, iErr
     integer :: iLon, iLat, iEnergy
-    integer :: y, mo, d, h, mi, s
-    real :: dummy(ED_N_Energies)
+    integer :: fileTime(7), bestTime(7)
+    integer(Int8_) :: dataPosition, bestPosition
+    real(Real8_) :: fileSeconds, bestSeconds, distance, bestDistance
+    character(len=1) :: skippedLine
 
-   IsLoaded = .false.
-   nLatsFile = 0
-   nLonsFile = 0
+    IsLoaded = .false.
+    nLatsFile = 0
+    nLonsFile = 0
+    bestPosition = 0
+    bestDistance = huge(1.0_Real8_)
+    bestSeconds = huge(1.0_Real8_)
+    fileTime = 0
 
     iUnit = io_unit_new()
-    open(iUnit, file=trim(cFile), status='old', action='read', iostat=iErr)
-    if (iErr /= 0) then
-       close(iUnit)
-       return
-    endif
+    open(iUnit, file=trim(cFile), status='old', action='read', &
+         access='stream', form='formatted', iostat=iErr)
+    if (iErr /= 0) return
 
     read(iUnit, *, iostat=iErr) nLatsFile, nLonsFile
     if (iErr /= 0) then
        close(iUnit)
        return
     endif
-
     if (nLatsFile <= 0 .or. nLonsFile <= 0) then
        close(iUnit)
        return
     endif
 
-    allocate(FluxLL(nLonsFile, nLatsFile, ED_N_Energies))
-    FluxLL = 0.0
-
+    ! Scan complete time blocks. Keep a 64-bit stream position so files
+    ! larger than 2 GB are supported without retaining all spectra in memory.
     do
-       read(iUnit, *, iostat=iErr) y, mo, d, h, mi, s
+       read(iUnit, *, iostat=iErr) fileTime(1:6)
        if (iErr /= 0) exit
+       call time_int_to_real(fileTime, fileSeconds)
+       distance = abs(fileSeconds - CurrentTime)
+       inquire(unit=iUnit, pos=dataPosition)
 
-       if (y == targetTime(1) .and. mo == targetTime(2) .and. d == targetTime(3) .and. &
-           h == targetTime(4) .and. mi == targetTime(5) .and. s == targetTime(6)) then
-          write(*,*) 'Found prec at ',h, ':', mi
-          do iLat = 1, nLatsFile
-             do iLon = 1, nLonsFile
-                read(iUnit, *, iostat=iErr) (FluxLL(iLon,iLat,iEnergy), iEnergy=1, ED_N_Energies)
-                if (iErr /= 0) exit
-             enddo
-             if (iErr /= 0) exit
-          enddo
-          if (iErr == 0) IsLoaded = .true.
-          exit
-       else
-          do iLat = 1, nLatsFile
-             do iLon = 1, nLonsFile
-                read(iUnit, *, iostat=iErr) (dummy(iEnergy), iEnergy=1, ED_N_Energies)
-                if (iErr /= 0) exit
-             enddo
+       do iLat = 1, nLatsFile
+          do iLon = 1, nLonsFile
+             read(iUnit, '(A)', iostat=iErr) skippedLine
              if (iErr /= 0) exit
           enddo
           if (iErr /= 0) exit
+       enddo
+       if (iErr /= 0) exit
+
+       ! Equal-distance ties select the earlier timestamp, regardless of
+       ! the order of time blocks in the input file.
+       if (distance < bestDistance .or. &
+           (distance == bestDistance .and. fileSeconds < bestSeconds)) then
+          bestDistance = distance
+          bestSeconds = fileSeconds
+          bestPosition = dataPosition
+          bestTime = fileTime
        endif
     enddo
 
-      close(iUnit)
-
-      if (.not.IsLoaded .and. allocated(FluxLL)) deallocate(FluxLL)
+    if (bestPosition > 0) then
+       allocate(FluxLL(nLonsFile, nLatsFile, ED_N_Energies))
+       ! Preserve the existing energy and spatial ordering of the reader.
+       read(iUnit, *, pos=bestPosition, iostat=iErr) &
+            (((FluxLL(iLon,iLat,iEnergy), iEnergy=1, ED_N_Energies), &
+              iLon=1, nLonsFile), iLat=1, nLatsFile)
+       IsLoaded = iErr == 0
+       if (IsLoaded) then
+          write(*,*) 'Found nearest prec at ', bestTime(1:6), &
+               ' offset (s): ', bestSeconds - CurrentTime
+       else
+          deallocate(FluxLL)
+       endif
+    endif
+    close(iUnit)
 
   end subroutine ReadEnergyFile
 
