@@ -639,7 +639,7 @@ contains
     integer :: iUnit, iErr, iLon, iLat, iEnergy, i, lo, hi, mid, chosen
     integer :: fileTime(7), capacity
     integer(Int8_) :: dataPosition
-    real(Real8_) :: fileSeconds, distance, bestDistance
+    real(Real8_) :: fileSeconds
     character(len=1) :: skippedLine
     logical :: rebuild
 
@@ -709,38 +709,37 @@ contains
     nLatsFile = Cache%nLats
     nLonsFile = Cache%nLons
     if (Cache%sorted) then
-       ! Lower bound: first timestamp >= target. Equal-distance ties go earlier.
+       ! Upper bound: first timestamp > target. Hold the preceding output
+       ! block so pre-resampled IDL frames never switch before their timestamp.
        lo = 1
        hi = Cache%nTimes + 1
        do while (lo < hi)
           mid = lo + (hi-lo)/2
-          if (Cache%seconds(mid) < CurrentTime) then
+          if (Cache%seconds(mid) <= CurrentTime) then
              lo = mid + 1
           else
              hi = mid
           endif
        enddo
-       chosen = min(lo, Cache%nTimes)
-       if (lo > 1 .and. lo <= Cache%nTimes) then
-          if (CurrentTime - Cache%seconds(lo-1) <= Cache%seconds(lo) - CurrentTime) chosen = lo-1
-       endif
-       ! Duplicates retain the first record, matching the original scan.
+       ! Before the input starts, retain the first block as before.
+       chosen = max(1, lo-1)
+       ! Duplicates retain the first record for the chosen timestamp.
        do while (chosen > 1)
           if (Cache%seconds(chosen-1) /= Cache%seconds(chosen)) exit
           chosen = chosen-1
        enddo
     else
-       ! Preserve correctness for older, unordered inputs without rescanning I/O.
-       chosen = 1
-       bestDistance = abs(Cache%seconds(1) - CurrentTime)
-       do i = 2, Cache%nTimes
-          distance = abs(Cache%seconds(i) - CurrentTime)
-          if (distance < bestDistance .or. &
-               (distance == bestDistance .and. Cache%seconds(i) < Cache%seconds(chosen))) then
+       ! Unordered inputs: latest timestamp <= target, or earliest if none.
+       chosen = 0
+       do i = 1, Cache%nTimes
+          if (Cache%seconds(i) > CurrentTime) cycle
+          if (chosen == 0) then
              chosen = i
-             bestDistance = distance
+          elseif (Cache%seconds(i) > Cache%seconds(chosen)) then
+             chosen = i
           endif
        enddo
+       if (chosen == 0) chosen = minloc(Cache%seconds(1:Cache%nTimes), dim=1)
     endif
 
     if (Cache%selected /= chosen) then
@@ -764,7 +763,7 @@ contains
           return
        endif
        Cache%selected = chosen
-       write(*,*) 'Found nearest prec at ', Cache%timestamps(1:6,chosen), &
+       write(*,*) 'Using held prec at ', Cache%timestamps(1:6,chosen), &
             ' offset (s): ', Cache%seconds(chosen) - CurrentTime
     endif
     FluxLL = Cache%flux
