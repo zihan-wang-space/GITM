@@ -593,6 +593,18 @@ subroutine UpdateEDEnergyFluxFromFile(iBlock)
 
    integer, intent(in) :: iBlock
    integer :: nLatsFile, nLonsFile
+
+  ! Per-MPI-process caches. Input files must remain unchanged during a run.
+  type :: EnergyFileCache
+     character(len=:), allocatable :: filename
+     integer :: nLats = 0, nLons = 0, nTimes = 0, selected = 0
+     logical :: sorted = .true.
+     real(Real8_), allocatable :: seconds(:)
+     integer(Int8_), allocatable :: positions(:)
+     integer, allocatable :: timestamps(:,:)
+     real, allocatable :: flux(:,:,:)
+  end type EnergyFileCache
+  type(EnergyFileCache), save :: ElectronCache, IonCache
    real, allocatable :: FluxMag(:,:,:)
    real, allocatable :: IonFluxMag(:,:,:)
 
@@ -601,12 +613,12 @@ subroutine UpdateEDEnergyFluxFromFile(iBlock)
   EDEnergyFlux_Loaded = .false.
   EDIonEnergyFlux_Loaded = .false.
 
-  call ReadEnergyFile(trim(EDEnergyFluxFile), nLatsFile, nLonsFile, FluxMag, EDEnergyFlux_Loaded)
+  call ReadEnergyFile(trim(EDEnergyFluxFile), nLatsFile, nLonsFile, FluxMag, EDEnergyFlux_Loaded, ElectronCache)
   if (EDEnergyFlux_Loaded) then
      call RemapMagToGeo(nLatsFile, nLonsFile, FluxMag, ED_EnergyFluxLL, iBlock)
   endif
 
-  call ReadEnergyFile(trim(EDIonEnergyFluxFile), nLatsFile, nLonsFile, IonFluxMag, EDIonEnergyFlux_Loaded)
+  call ReadEnergyFile(trim(EDIonEnergyFluxFile), nLatsFile, nLonsFile, IonFluxMag, EDIonEnergyFlux_Loaded, IonCache)
   if (EDIonEnergyFlux_Loaded) then
      call RemapMagToGeo(nLatsFile, nLonsFile, IonFluxMag, ED_Ion_EnergyFluxLL, iBlock)
   endif
@@ -616,87 +628,147 @@ subroutine UpdateEDEnergyFluxFromFile(iBlock)
 
 contains
 
-   subroutine ReadEnergyFile(cFile, nLatsFile, nLonsFile, FluxLL, IsLoaded)
+   subroutine ReadEnergyFile(cFile, nLatsFile, nLonsFile, FluxLL, IsLoaded, Cache)
 
     character(len=*), intent(in) :: cFile
     integer, intent(out) :: nLatsFile, nLonsFile
     real, allocatable, intent(out) :: FluxLL(:,:,:)
     logical, intent(out) :: IsLoaded
+    type(EnergyFileCache), intent(inout) :: Cache
 
-    integer :: iUnit, iErr
-    integer :: iLon, iLat, iEnergy
-    integer :: fileTime(7), bestTime(7)
-    integer(Int8_) :: dataPosition, bestPosition
-    real(Real8_) :: fileSeconds, bestSeconds, distance, bestDistance
+    integer :: iUnit, iErr, iLon, iLat, iEnergy, i, lo, hi, mid, chosen
+    integer :: fileTime(7), capacity
+    integer(Int8_) :: dataPosition
+    real(Real8_) :: fileSeconds, distance, bestDistance
     character(len=1) :: skippedLine
+    logical :: rebuild
 
     IsLoaded = .false.
     nLatsFile = 0
     nLonsFile = 0
-    bestPosition = 0
-    bestDistance = huge(1.0_Real8_)
-    bestSeconds = huge(1.0_Real8_)
-    fileTime = 0
-
-    iUnit = io_unit_new()
-    open(iUnit, file=trim(cFile), status='old', action='read', &
-         access='stream', form='formatted', iostat=iErr)
-    if (iErr /= 0) return
-
-    read(iUnit, *, iostat=iErr) nLatsFile, nLonsFile
-    if (iErr /= 0) then
-       close(iUnit)
-       return
-    endif
-    if (nLatsFile <= 0 .or. nLonsFile <= 0) then
-       close(iUnit)
-       return
-    endif
-
-    ! Scan complete time blocks. Keep a 64-bit stream position so files
-    ! larger than 2 GB are supported without retaining all spectra in memory.
-    do
-       read(iUnit, *, iostat=iErr) fileTime(1:6)
-       if (iErr /= 0) exit
-       call time_int_to_real(fileTime, fileSeconds)
-       distance = abs(fileSeconds - CurrentTime)
-       inquire(unit=iUnit, pos=dataPosition)
-
-       do iLat = 1, nLatsFile
-          do iLon = 1, nLonsFile
-             read(iUnit, '(A)', iostat=iErr) skippedLine
+    rebuild = .not. allocated(Cache%filename)
+    if (.not. rebuild) rebuild = Cache%filename /= trim(cFile)
+    if (rebuild) then
+       if (allocated(Cache%seconds)) deallocate(Cache%seconds, Cache%positions, Cache%timestamps)
+       if (allocated(Cache%flux)) deallocate(Cache%flux)
+       Cache%filename = trim(cFile)
+       Cache%nTimes = 0
+       Cache%selected = 0
+       Cache%sorted = .true.
+       iUnit = io_unit_new()
+       open(iUnit, file=trim(cFile), status='old', action='read', &
+            access='stream', form='formatted', iostat=iErr)
+       if (iErr /= 0) then
+          deallocate(Cache%filename)
+          return
+       endif
+       read(iUnit, *, iostat=iErr) Cache%nLats, Cache%nLons
+       if (iErr /= 0) then
+          close(iUnit)
+          deallocate(Cache%filename)
+          return
+       endif
+       if (Cache%nLats <= 0 .or. Cache%nLons <= 0) then
+          close(iUnit)
+          deallocate(Cache%filename)
+          return
+       endif
+       capacity = 256
+       allocate(Cache%seconds(capacity), Cache%positions(capacity), Cache%timestamps(7,capacity))
+       do
+          fileTime = 0
+          read(iUnit, *, iostat=iErr) fileTime(1:6)
+          if (iErr /= 0) exit
+          call time_int_to_real(fileTime, fileSeconds)
+          inquire(unit=iUnit, pos=dataPosition)
+          do iLat = 1, Cache%nLats
+             do iLon = 1, Cache%nLons
+                read(iUnit, '(A)', iostat=iErr) skippedLine
+                if (iErr /= 0) exit
+             enddo
              if (iErr /= 0) exit
           enddo
           if (iErr /= 0) exit
+          if (Cache%nTimes == capacity) then
+             Cache%seconds = [Cache%seconds, Cache%seconds]
+             Cache%positions = [Cache%positions, Cache%positions]
+             Cache%timestamps = reshape([Cache%timestamps, Cache%timestamps], [7, 2*capacity])
+             capacity = 2*capacity
+          endif
+          i = Cache%nTimes + 1
+          if (i > 1) Cache%sorted = Cache%sorted .and. fileSeconds >= Cache%seconds(i-1)
+          Cache%seconds(i) = fileSeconds
+          Cache%positions(i) = dataPosition
+          Cache%timestamps(:,i) = fileTime
+          Cache%nTimes = i
        enddo
-       if (iErr /= 0) exit
-
-       ! Equal-distance ties select the earlier timestamp, regardless of
-       ! the order of time blocks in the input file.
-       if (distance < bestDistance .or. &
-           (distance == bestDistance .and. fileSeconds < bestSeconds)) then
-          bestDistance = distance
-          bestSeconds = fileSeconds
-          bestPosition = dataPosition
-          bestTime = fileTime
-       endif
-    enddo
-
-    if (bestPosition > 0) then
-       allocate(FluxLL(nLonsFile, nLatsFile, ED_N_Energies))
-       ! Preserve the existing energy and spatial ordering of the reader.
-       read(iUnit, *, pos=bestPosition, iostat=iErr) &
-            (((FluxLL(iLon,iLat,iEnergy), iEnergy=1, ED_N_Energies), &
-              iLon=1, nLonsFile), iLat=1, nLatsFile)
-       IsLoaded = iErr == 0
-       if (IsLoaded) then
-          write(*,*) 'Found nearest prec at ', bestTime(1:6), &
-               ' offset (s): ', bestSeconds - CurrentTime
-       else
-          deallocate(FluxLL)
-       endif
+       close(iUnit)
     endif
-    close(iUnit)
+
+    if (Cache%nTimes == 0) return
+    nLatsFile = Cache%nLats
+    nLonsFile = Cache%nLons
+    if (Cache%sorted) then
+       ! Lower bound: first timestamp >= target. Equal-distance ties go earlier.
+       lo = 1
+       hi = Cache%nTimes + 1
+       do while (lo < hi)
+          mid = lo + (hi-lo)/2
+          if (Cache%seconds(mid) < CurrentTime) then
+             lo = mid + 1
+          else
+             hi = mid
+          endif
+       enddo
+       chosen = min(lo, Cache%nTimes)
+       if (lo > 1 .and. lo <= Cache%nTimes) then
+          if (CurrentTime - Cache%seconds(lo-1) <= Cache%seconds(lo) - CurrentTime) chosen = lo-1
+       endif
+       ! Duplicates retain the first record, matching the original scan.
+       do while (chosen > 1)
+          if (Cache%seconds(chosen-1) /= Cache%seconds(chosen)) exit
+          chosen = chosen-1
+       enddo
+    else
+       ! Preserve correctness for older, unordered inputs without rescanning I/O.
+       chosen = 1
+       bestDistance = abs(Cache%seconds(1) - CurrentTime)
+       do i = 2, Cache%nTimes
+          distance = abs(Cache%seconds(i) - CurrentTime)
+          if (distance < bestDistance .or. &
+               (distance == bestDistance .and. Cache%seconds(i) < Cache%seconds(chosen))) then
+             chosen = i
+             bestDistance = distance
+          endif
+       enddo
+    endif
+
+    if (Cache%selected /= chosen) then
+       if (allocated(Cache%flux)) deallocate(Cache%flux)
+       allocate(Cache%flux(nLonsFile, nLatsFile, ED_N_Energies))
+       iUnit = io_unit_new()
+       open(iUnit, file=trim(cFile), status='old', action='read', &
+            access='stream', form='formatted', iostat=iErr)
+       if (iErr /= 0) then
+          deallocate(Cache%flux)
+          Cache%selected = 0
+          return
+       endif
+       read(iUnit, *, pos=Cache%positions(chosen), iostat=iErr) &
+            (((Cache%flux(iLon,iLat,iEnergy), iEnergy=1, ED_N_Energies), &
+              iLon=1, nLonsFile), iLat=1, nLatsFile)
+       close(iUnit)
+       if (iErr /= 0) then
+          deallocate(Cache%flux)
+          Cache%selected = 0
+          return
+       endif
+       Cache%selected = chosen
+       write(*,*) 'Found nearest prec at ', Cache%timestamps(1:6,chosen), &
+            ' offset (s): ', Cache%seconds(chosen) - CurrentTime
+    endif
+    FluxLL = Cache%flux
+    IsLoaded = .true.
 
   end subroutine ReadEnergyFile
 
